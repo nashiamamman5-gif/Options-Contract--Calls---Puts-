@@ -10,6 +10,9 @@
 (define-constant err-invalid-expiry (err u108))
 (define-constant err-not-owner (err u109))
 (define-constant err-oracle-not-set (err u110))
+(define-constant err-order-not-found (err u111))
+(define-constant err-not-for-sale (err u112))
+(define-constant err-insufficient-price (err u113))
 
 (define-data-var option-nonce uint u0)
 (define-data-var oracle-price uint u0)
@@ -19,6 +22,8 @@
 (define-data-var lp-token-supply uint u0)
 (define-data-var total-fees-collected uint u0)
 (define-data-var implied-volatility uint u30)
+
+(define-data-var order-nonce uint u0)
 
 (define-map options
   uint
@@ -37,6 +42,16 @@
 (define-map lp-balances
   principal
   uint
+)
+
+(define-map sell-orders
+  uint
+  {
+    option-id: uint,
+    seller: principal,
+    asking-price: uint,
+    active: bool,
+  }
 )
 
 (define-read-only (get-option (option-id uint))
