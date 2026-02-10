@@ -10,6 +10,10 @@
 (define-constant err-invalid-expiry (err u108))
 (define-constant err-not-owner (err u109))
 (define-constant err-oracle-not-set (err u110))
+(define-constant err-order-not-found (err u111))
+(define-constant err-not-for-sale (err u112))
+(define-constant err-insufficient-price (err u113))
+(define-constant err-bid-not-found (err u114))
 
 (define-data-var option-nonce uint u0)
 (define-data-var oracle-price uint u0)
@@ -19,6 +23,9 @@
 (define-data-var lp-token-supply uint u0)
 (define-data-var total-fees-collected uint u0)
 (define-data-var implied-volatility uint u30)
+
+(define-data-var order-nonce uint u0)
+(define-data-var bid-nonce uint u0)
 
 (define-map options
   uint
@@ -37,6 +44,26 @@
 (define-map lp-balances
   principal
   uint
+)
+
+(define-map sell-orders
+  uint
+  {
+    option-id: uint,
+    seller: principal,
+    asking-price: uint,
+    active: bool,
+  }
+)
+
+(define-map buy-orders
+  uint
+  {
+    bid-id: uint,
+    buyer: principal,
+    option-id: uint,
+    bid-price: uint,
+  }
 )
 
 (define-read-only (get-option (option-id uint))
@@ -331,6 +358,160 @@
   (begin
     (asserts! (is-eq tx-sender contract-owner) err-owner-only)
     (var-set implied-volatility volatility)
+    (ok true)
+  )
+)
+
+(define-public (list-option-for-sale
+    (option-id uint)
+    (asking-price uint)
+  )
+  (let (
+      (option-data (unwrap! (map-get? options option-id) err-not-found))
+      (order-id (var-get order-nonce))
+    )
+    (asserts! (is-eq (get owner option-data) tx-sender) err-not-owner)
+    (asserts! (< stacks-block-height (get expiry-block option-data)) err-expired)
+    (asserts! (not (get exercised option-data)) err-already-exercised)
+    (asserts! (> asking-price u0) err-insufficient-price)
+
+    (map-set options option-id
+      (merge option-data { owner: (as-contract tx-sender) })
+    )
+
+    (map-set sell-orders order-id {
+      option-id: option-id,
+      seller: tx-sender,
+      asking-price: asking-price,
+      active: true,
+    })
+
+    (var-set order-nonce (+ order-id u1))
+    (ok order-id)
+  )
+)
+
+(define-public (cancel-listing (order-id uint))
+  (let (
+      (order-data (unwrap! (map-get? sell-orders order-id) err-order-not-found))
+      (option-id (get option-id order-data))
+      (option-data (unwrap! (map-get? options option-id) err-not-found))
+    )
+    (asserts! (is-eq (get seller order-data) tx-sender) err-not-owner)
+    (asserts! (get active order-data) err-not-for-sale)
+
+    (map-set sell-orders order-id (merge order-data { active: false }))
+
+    (map-set options option-id (merge option-data { owner: tx-sender }))
+
+    (ok true)
+  )
+)
+
+(define-public (buy-listed-option (order-id uint))
+  (let (
+      (order-data (unwrap! (map-get? sell-orders order-id) err-order-not-found))
+      (option-id (get option-id order-data))
+      (seller (get seller order-data))
+      (asking-price (get asking-price order-data))
+      (option-data (unwrap! (map-get? options option-id) err-not-found))
+    )
+    (asserts! (get active order-data) err-not-for-sale)
+    (asserts! (>= (stx-get-balance tx-sender) asking-price)
+      err-insufficient-payment
+    )
+
+    (try! (stx-transfer? asking-price tx-sender seller))
+
+    (map-set sell-orders order-id (merge order-data { active: false }))
+
+    (map-set options option-id (merge option-data { owner: tx-sender }))
+
+    (ok option-id)
+  )
+)
+
+(define-public (update-listing-price
+    (order-id uint)
+    (new-price uint)
+  )
+  (let ((order-data (unwrap! (map-get? sell-orders order-id) err-order-not-found)))
+    (asserts! (is-eq (get seller order-data) tx-sender) err-not-owner)
+    (asserts! (get active order-data) err-not-for-sale)
+    (asserts! (> new-price u0) err-insufficient-price)
+
+    (map-set sell-orders order-id (merge order-data { asking-price: new-price }))
+
+    (ok true)
+  )
+)
+
+(define-read-only (get-listing (order-id uint))
+  (map-get? sell-orders order-id)
+)
+
+(define-read-only (get-order-nonce)
+  (ok (var-get order-nonce))
+)
+
+(define-read-only (get-bid (bid-id uint))
+  (map-get? buy-orders bid-id)
+)
+
+(define-public (place-bid
+    (option-id uint)
+    (bid-price uint)
+  )
+  (let (
+      (bid-id (var-get bid-nonce))
+      (option-data (unwrap! (map-get? options option-id) err-not-found))
+    )
+    (asserts! (not (get exercised option-data)) err-already-exercised)
+    (asserts! (< stacks-block-height (get expiry-block option-data)) err-expired)
+    (asserts! (> bid-price u0) err-insufficient-price)
+    (asserts! (>= (stx-get-balance tx-sender) bid-price) err-insufficient-payment)
+
+    (try! (stx-transfer? bid-price tx-sender (as-contract tx-sender)))
+
+    (map-set buy-orders bid-id {
+      bid-id: bid-id,
+      buyer: tx-sender,
+      option-id: option-id,
+      bid-price: bid-price,
+    })
+
+    (var-set bid-nonce (+ bid-id u1))
+    (ok bid-id)
+  )
+)
+
+(define-public (cancel-bid (bid-id uint))
+  (let ((bid-data (unwrap! (map-get? buy-orders bid-id) err-bid-not-found)))
+    (asserts! (is-eq (get buyer bid-data) tx-sender) err-not-owner)
+
+    (try! (as-contract (stx-transfer? (get bid-price bid-data) tx-sender (get buyer bid-data))))
+
+    (map-delete buy-orders bid-id)
+    (ok true)
+  )
+)
+
+(define-public (accept-bid (bid-id uint))
+  (let (
+      (bid-data (unwrap! (map-get? buy-orders bid-id) err-bid-not-found))
+      (option-id (get option-id bid-data))
+      (option-data (unwrap! (map-get? options option-id) err-not-found))
+      (seller tx-sender)
+      (buyer (get buyer bid-data))
+      (price (get bid-price bid-data))
+    )
+    (asserts! (is-eq (get owner option-data) seller) err-not-owner)
+    (asserts! (not (get exercised option-data)) err-already-exercised)
+    (asserts! (< stacks-block-height (get expiry-block option-data)) err-expired)
+
+    (map-set options option-id (merge option-data { owner: buyer }))
+    (try! (as-contract (stx-transfer? price tx-sender seller)))
+    (map-delete buy-orders bid-id)
     (ok true)
   )
 )
